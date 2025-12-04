@@ -1,0 +1,133 @@
+from brython_robot4 import init, load_scene_from_url, get_url_parameter
+from browser import aio
+
+# ------------------------------------------------------------
+# 輔助函式 (Helper Functions)
+# ------------------------------------------------------------
+
+async def turn_right(robot):
+    """讓機器人右轉一次 (相當於左轉三次)"""
+    for _ in range(3):
+        await robot.turn_left()
+
+async def ensure_direction(robot, target_direction):
+    """將機器人轉向指定的方向 (0:東, 1:北, 2:西, 3:南)"""
+    while robot.direction() != target_direction:
+        await robot.turn_left()
+
+async def collect_if_carrots_present(robot, limit):
+    """在當前格子採集所有胡蘿蔔，直到清空或達到上限。"""
+    collected = False
+    while robot.background_is("pale_grass") and robot.carrots_collected < limit:
+        await robot.pick_carrot()
+        collected = True
+    return collected
+
+# ------------------------------------------------------------
+# 主要行為腳本 (Core Robot Actions)
+# ------------------------------------------------------------
+
+async def robot_actions(robot):
+    print("🤖 啟動機器人，執行水平來回採收模式 (優化版)。")
+    
+    OBJECT_LIMIT = robot.config.max_carrots # 應為 36
+    
+    # 1. 初始定位：移動到採收區域的起點
+    # 假設這是從 (0, 0) 移到 (2, 2) 並面向北方 (1) 的過程
+    
+    # 嘗試向前移動 2 步
+    for _ in range(2):
+        if robot.front_is_clear():
+            await robot.move(1)
+        else:
+            print("🚨 定位階段遇到障礙，無法移動 2 步。")
+            return
+            
+    await robot.turn_left() # 轉向西方 (2)
+    
+    # 嘗試向前移動 2 步
+    for _ in range(2):
+        if robot.front_is_clear():
+            await robot.move(1)
+        else:
+            print("🚨 定位階段遇到障礙，無法移動 2 步。")
+            return
+
+    # 確保機器人面向東方 (East: 0) 作為起點
+    await ensure_direction(robot, 0)
+    
+    # ------------------------------------------------------------
+    # 2. 採收迴圈邏輯：來回掃描
+    # ------------------------------------------------------------
+    
+    row_count = 0
+    done = False
+    
+    # 外部迴圈控制來回掃描
+    while robot.carrots_collected < OBJECT_LIMIT and not done:
+        
+        # 決定當前行的採集方向 (0:東, 2:西)
+        direction = 0 if row_count % 2 == 0 else 2
+        
+        # 確保朝向正確的方向
+        await ensure_direction(robot, direction)
+        
+        print(f"-> 採集第 {row_count + 1} 行 ({'東' if direction == 0 else '西'})")
+
+        # 採集一行 (最多 6 步)
+        for step in range(6):
+            
+            # 1. 採集當前格子
+            await collect_if_carrots_present(robot, OBJECT_LIMIT)
+                
+            if robot.carrots_collected >= OBJECT_LIMIT:
+                done = True
+                break
+                
+            # 2. 移動到下一格 (如果不是最後一格)
+            if step < 5: 
+                if robot.front_is_clear():
+                    await robot.move(1)
+                else:
+                    print("🚨 採集中遇到障礙，提前停止採收。")
+                    done = True
+                    break
+        
+        if done: break
+
+        # 3. 換行準備：轉向上方 (North: 1)
+        await ensure_direction(robot, 1) # 轉向北方
+            
+        if robot.front_is_clear():
+            await robot.move(1) # 向上換行
+            row_count += 1
+        else:
+            # 已經到達世界的頂部或邊界
+            print("⬆️ 無法向上換行，已到達世界邊界。採集結束。")
+            break
+            
+    # ------------------------------------------------------------
+    # 3. 程式結束
+    # ------------------------------------------------------------
+    
+    if robot.carrots_collected >= OBJECT_LIMIT:
+        print(f"✅ 任務完成！已採集 {robot.carrots_collected} 個胡蘿蔔。")
+    else:
+        print(f"🏁 程式執行完畢。總共採集了 {robot.carrots_collected} 個胡蘿蔔。")
+
+# 程式啟動點
+async def main():
+    world_url = get_url_parameter('world')
+    if world_url:
+        scene_data = await load_scene_from_url(world_url)
+        # 這裡設定容量上限為 36，與原程式碼的限制匹配
+        world, robot = init(scene_data, robot_config={"max_carrots": 36})
+    else:
+        # 預設場景也設定容量上限
+        world, robot = init(robot_config={"max_carrots": 36})
+
+    if robot:
+        await robot_actions(robot)
+
+# 啟動主程式
+aio.run(main())
