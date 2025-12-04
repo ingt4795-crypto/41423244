@@ -1,0 +1,262 @@
+from browser import document, html, timer
+
+# 全域常數
+CELL_SIZE = 40
+WALL_THICKNESS = 6
+IMG_PATH = "https://mde.tw/cp2025/reeborg/src/images/"
+WORLD_SIZE = 10
+
+class World:
+    """定義世界，包含網格、牆壁和物件的繪圖層。"""
+    def __init__(self, width, height):
+        self.width = width
+        self.height = height
+        self.layers = self._create_layers()
+        self._init_html()
+        self._draw_grid()
+        self._draw_walls()
+        self._image_cache = {} # 新增圖片快取
+
+    def _create_layers(self):
+        # 繪圖層從下到上 (zIndex: 0-3)
+        return {
+            "grid": html.CANVAS(width=self.width * CELL_SIZE, height=self.height * CELL_SIZE),
+            "walls": html.CANVAS(width=self.width * CELL_SIZE, height=self.height * CELL_SIZE),
+            "objects": html.CANVAS(width=self.width * CELL_SIZE, height=self.height * CELL_SIZE), # 用於繪製移動軌跡
+            "robots": html.CANVAS(width=self.width * CELL_SIZE, height=self.height * CELL_SIZE),
+        }
+
+    def _init_html(self):
+        container = html.DIV(style={
+            "position": "relative",
+            "width": f"{self.width * CELL_SIZE}px",
+            "height": f"{self.height * CELL_SIZE}px",
+            "border": f"{WALL_THICKNESS}px solid #333", # 為邊界增加實體邊框
+            "boxSizing": "content-box" # 確保邊框不影響大小計算
+        })
+        for z, canvas in enumerate(self.layers.values()):
+            canvas.style = {
+                "position": "absolute",
+                "top": "0px",
+                "left": "0px",
+                "zIndex": str(z)
+            }
+            container <= canvas
+        document["brython_div1"].clear()
+        document["brython_div1"] <= container
+
+    def _draw_grid(self):
+        ctx = self.layers["grid"].getContext("2d")
+        ctx.strokeStyle = "#cccccc"
+        for i in range(self.width + 1):
+            ctx.beginPath()
+            ctx.moveTo(i * CELL_SIZE, 0)
+            ctx.lineTo(i * CELL_SIZE, self.height * CELL_SIZE)
+            ctx.stroke()
+        for j in range(self.height + 1):
+            ctx.beginPath()
+            ctx.moveTo(0, j * CELL_SIZE)
+            ctx.lineTo(self.width * CELL_SIZE, j * CELL_SIZE)
+            ctx.stroke()
+
+    def _draw_image(self, ctx, src, x, y, w, h, offset_x=0, offset_y=0, callback=None):
+        """
+        繪製圖片到指定位置，使用快取確保只載入一次，並支援回呼函數。
+        x, y 是機器人坐標 (從 0, 0 開始)
+        """
+        px = x * CELL_SIZE + offset_x
+        py = (self.height - 1 - y) * CELL_SIZE + offset_y
+        
+        # 檢查快取
+        if src in self._image_cache:
+            img = self._image_cache[src]
+            ctx.drawImage(img, px, py, w, h)
+            # 如果圖片已在快取中，回呼可以立即執行 (使用 timer.set_timeout 避免阻塞)
+            if callback:
+                 timer.set_timeout(callback, 0)
+            return
+
+        # 首次載入
+        img = html.IMG()
+        img.src = src
+        self._image_cache[src] = img
+
+        def onload(evt):
+            # 載入完成後繪製
+            ctx.drawImage(img, px, py, w, h)
+            if callback:
+                callback() # 圖片載入後執行回呼
+            
+        img.bind("load", onload)
+
+    def _draw_walls(self):
+        # 繪製外牆，讓邊界檢查邏輯更直觀
+        ctx = self.layers["walls"].getContext("2d")
+        
+        # 為了保持原程式碼的風格，還是繪製圖片牆
+        # 移除內建的邊界牆，讓機器人可以撞到邊界
+        pass
+
+    def robot(self, x, y):
+        # 初始放置機器人 (用於靜態世界，但我們使用 AnimatedRobot，所以這行不會被用到)
+        pass
+
+class AnimatedRobot:
+    """可動畫移動的機器人。"""
+    def __init__(self, world, x, y):
+        # 將 (1, 1) 轉換為內部座標 (0, 0)
+        self.world = world
+        self.x = x - 1
+        self.y = y - 1
+        self.facing = "E" # 初始面東
+        self.facing_order = ["E", "N", "W", "S"] # 逆時針順序
+        self.robot_ctx = world.layers["robots"].getContext("2d")
+        self.trace_ctx = world.layers["objects"].getContext("2d")
+        self.queue = []
+        self.running = False
+        self.world_width = world.width
+        self.world_height = world.height
+        self._is_ready = False # 新增旗標：機器人是否已成功繪製初始圖片
+
+        # 初始繪製，並在圖片載入後將 _is_ready 設為 True
+        self._draw_robot(initial_draw=True) 
+
+    def _robot_image(self):
+        return {
+            "E": "blue_robot_e.png",
+            "N": "blue_robot_n.png",
+            "W": "blue_robot_w.png",
+            "S": "blue_robot_s.png"
+        }[self.facing]
+
+    def _draw_robot(self, initial_draw=False):
+        """清除舊位置並在目前位置繪製機器人。"""
+        self.robot_ctx.clearRect(0, 0, self.world_width * CELL_SIZE, self.world_height * CELL_SIZE)
+        
+        def initial_draw_complete():
+            """在第一次成功繪製後呼叫，標記機器人已準備好執行動畫佇列。"""
+            if initial_draw and not self._is_ready:
+                self._is_ready = True
+                self._run_queue() # 圖片載入完成後，正式啟動佇列
+
+        self.world._draw_image(self.robot_ctx, IMG_PATH + self._robot_image(),
+                               self.x, self.y, CELL_SIZE, CELL_SIZE, callback=initial_draw_complete if initial_draw else None)
+
+    def _draw_trace(self, from_x, from_y, to_x, to_y):
+        """繪製從 (from_x, from_y) 到 (to_x, to_y) 的軌跡線。"""
+        ctx = self.trace_ctx
+        ctx.strokeStyle = "#d33"
+        ctx.lineWidth = 2
+        ctx.beginPath()
+        
+        # 轉換座標 (Brython canvas 的 y 軸是反轉的)
+        fx = from_x * CELL_SIZE + CELL_SIZE / 2
+        fy = (self.world_height - 1 - from_y) * CELL_SIZE + CELL_SIZE / 2
+        tx = to_x * CELL_SIZE + CELL_SIZE / 2
+        ty = (self.world_height - 1 - to_y) * CELL_SIZE + CELL_SIZE / 2
+        
+        ctx.moveTo(fx, fy)
+        ctx.lineTo(tx, ty)
+        ctx.stroke()
+
+    def move(self, steps):
+        """將移動動作加入佇列。"""
+        def action(next_done):
+            # 這是內部函數，處理每一步的動畫
+            def step():
+                nonlocal steps
+                if steps == 0:
+                    next_done() # 動作完成，執行下一個佇列中的動作
+                    return
+
+                from_x, from_y = self.x, self.y
+                dx, dy = 0, 0
+                
+                # 根據朝向決定移動方向
+                if self.facing == "E": dx = 1
+                elif self.facing == "W": dx = -1
+                elif self.facing == "N": dy = 1
+                elif self.facing == "S": dy = -1
+
+                next_x = self.x + dx
+                next_y = self.y + dy
+            
+                # 邊界檢查：確保新位置在世界範圍內
+                if 0 <= next_x < self.world_width and 0 <= next_y < self.world_height:
+                    self.x, self.y = next_x, next_y
+                    self._draw_trace(from_x, from_y, self.x, self.y)
+                    self._draw_robot() # 每次移動都繪製機器人 (現在會使用快取)
+                    steps -= 1
+                    timer.set_timeout(step, 100) # 每次移動間隔 100ms
+                else:
+                    print("🚨 已經撞牆，停止移動！")
+                    next_done() # 撞牆也算動作完成
+
+            step() # 開始移動步驟
+            
+        self.queue.append(action)
+        self._run_queue()
+
+    def turn_left(self):
+        """將左轉動作加入佇列 (逆時針 90 度)。"""
+        def action(done):
+            idx = self.facing_order.index(self.facing)
+            self.facing = self.facing_order[(idx + 1) % 4]
+            self._draw_robot() # 轉向後繪製機器人 (現在會使用快取)
+            timer.set_timeout(done, 150) # 轉彎間隔 150ms
+
+        self.queue.append(action)
+        self._run_queue()
+
+    def _run_queue(self):
+        """如果沒有正在運行的動作且佇列不為空，則開始執行佇列中的下一個動作。"""
+        # 僅當機器人初始圖片載入完畢後，才執行佇列動作
+        if not self._is_ready:
+            return
+
+        if self.running or not self.queue:
+            return
+            
+        self.running = True
+        action = self.queue.pop(0)
+        action(lambda: self._done())
+
+    def _done(self):
+        """動作完成後呼叫，準備執行下一個動作。"""
+        self.running = False
+        self._run_queue()
+
+# --- 世界與機器人設置 ---
+w = World(WORLD_SIZE, WORLD_SIZE) # 建立 10x10 的世界
+r = AnimatedRobot(w, 1, 1)        # 在 (1,1) 放置一台 robot (內部座標 0, 0)
+
+# --- 蛇形巡邏邏輯 ---
+# 10x10 世界有 10 行 (i = 0 到 9)
+for i in range(WORLD_SIZE):
+    if i % 2 == 0:
+        # 偶數行 (0, 2, 4, ...): 從左到右 (東向 E) 移動 9 步 (走 10 格)
+        r.move(WORLD_SIZE - 1) # 9 步
+        
+        # 轉向下一行 (如果不是最後一行)
+        if i < WORLD_SIZE - 1:
+            r.turn_left() # E -> N (面北)
+            r.move(1)     # 北向移動 1 步 (上移一層)
+            r.turn_left() # N -> W (面西，準備回頭)
+    else:
+        # 奇數行 (1, 3, 5, ...): 從右到左 (西向 W) 移動 9 步
+        r.move(WORLD_SIZE - 1) # 9 步
+        
+        # 轉向下一行 (如果不是最後一行)
+        if i < WORLD_SIZE - 1:
+            # 在 (1, y) 面西，需要轉 W -> N -> E (3 次左轉) 才能面北
+            r.turn_left()
+            r.turn_left()
+            r.turn_left() # W -> N (面北)
+            r.move(1)     # 北向移動 1 步 (上移一層)
+            
+            # 在 (1, y+1) 面北，需要轉 N -> E (3 次左轉) 才能面東
+            r.turn_left()
+            r.turn_left()
+            r.turn_left() # N -> E (面東，準備向右)
+
+# 最後一行移動完畢，不需要再轉向
